@@ -1,0 +1,30 @@
+title = "raven gitleaks config"
+
+[extend]
+useDefault = true
+
+# Google OAuth client secrets ("GOCSPX-...") and refresh tokens ("1//...").
+[[rules]]
+id = "google-oauth-client-secret"
+description = "Google OAuth client secret"
+regex = '''GOCSPX-[A-Za-z0-9_\-]{20,}'''
+
+[[rules]]
+id = "google-oauth-refresh-token"
+description = "Google OAuth refresh token"
+regex = '''1//0[A-Za-z0-9_\-]{40,}'''
+
+# Anthropic / OpenRouter keys used by the agent.
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key"
+regex = '''sk-ant-[A-Za-z0-9_\-]{20,}'''
+
+[[rules]]
+id = "openrouter-api-key"
+description = "OpenRouter API key"
+regex = '''sk-or-[A-Za-z0-9_\-]{20,}'''
+
+[allowlist]
+description = "Template files carry placeholders only"
+paths = ['''Config/Secrets\.example\.xcconfig''']

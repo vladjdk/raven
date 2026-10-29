@@ -1,0 +1,41 @@
+# --- Secrets: never commit these ---------------------------------------
+# Real config lives in Secrets.xcconfig (copy from Secrets.example.xcconfig).
+Config/Secrets.xcconfig
+*.xcconfig.local
+.env
+.env.*
+!.env.example
+*.pem
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.provisionprofile
+client_secret*.json
+credentials*.json
+token*.json
+GoogleService-Info.plist
+
+# --- Local mail data (the agent's mailbox mirror, caches, databases) ----
+mailfs/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.eml
+*.mbox
+
+# --- Xcode / Swift -------------------------------------------------------
+.build/
+build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+.swiftpm/
+
+
+# --- OS / editors --------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,19 @@
+#!/bin/sh
+# Blocks any commit that contains a secret. Enable once per clone:
+#   git config core.hooksPath .githooks
+set -e
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks is required (brew install gitleaks). Commit blocked." >&2
+  exit 1
+fi
+
+gitleaks git --staged --redact --no-banner --config .gitleaks.toml
+
+# Belt and braces: refuse files that should only ever exist locally.
+blocked=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)(Secrets\.xcconfig|\.env(\..+)?|client_secret.*\.json|credentials.*\.json|token.*\.json)$' | grep -v '\.env\.example$' || true)
+if [ -n "$blocked" ]; then
+  echo "pre-commit: refusing to commit local-only files:" >&2
+  echo "$blocked" >&2
+  exit 1
+fi
