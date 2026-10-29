@@ -1,0 +1,42 @@
+# Generate the Xcode project with: xcodegen generate
+name: Raven
+options:
+  bundleIdPrefix: dev.raven
+  deploymentTarget:
+    macOS: "14.0"
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
+packages:
+  RavenCore:
+    path: Packages/RavenCore
+targets:
+  Raven:
+    type: application
+    platform: macOS
+    sources: [App]
+    dependencies:
+      - package: RavenCore
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Raven
+        CFBundleShortVersionString: "0.1.0"
+        LSApplicationCategoryType: public.app-category.productivity
+        GoogleClientID: $(GOOGLE_OAUTH_CLIENT_ID)
+        GoogleClientSecret: $(GOOGLE_OAUTH_CLIENT_SECRET)
+    entitlements:
+      path: App/Raven.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        # The OAuth redirect lands on a one-shot listener on 127.0.0.1.
+        com.apple.security.network.server: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.raven.Raven
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        ENABLE_HARDENED_RUNTIME: true
+        GENERATE_INFOPLIST_FILE: false

@@ -1,0 +1,6 @@
+// Shared build settings. Real OAuth values come from Secrets.xcconfig (gitignored);
+// without it the app builds and offers demo mode instead of Google sign-in.
+GOOGLE_OAUTH_CLIENT_ID =
+GOOGLE_OAUTH_CLIENT_SECRET =
+
+#include? "Secrets.xcconfig"
