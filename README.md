@@ -1,0 +1,26 @@
+# Raven
+
+A fast, keyboard-first, agent-forward email client for macOS. Native SwiftUI, local-first, open source.
+
+> Early days: there's a spec and designs, and code is next. See [docs/SPEC.md](docs/SPEC.md).
+
+- **Instant:** every action is local first, with sync afterward.
+- **Keyboard everything:** `j/k`, `e`, `h`, `⌘K`.
+- **Agent built in:** an embedded [nanocode](https://github.com/gakonst/nanocode-swift) agent that triages and drafts using the same tools you do. It never sends without you.
+- **No server:** your mail goes from your provider to your Mac. Keys live in the Keychain.
+
+## Contributing: secrets
+
+This repo is public. Before your first commit:
+
+```bash
+brew install gitleaks
+git config core.hooksPath .githooks
+cp Config/Secrets.example.xcconfig Config/Secrets.xcconfig   # gitignored; put your own OAuth client here
+```
+
+The pre-commit hook and CI both run gitleaks and block commits that contain secrets.
+
+## License
+
+MIT
