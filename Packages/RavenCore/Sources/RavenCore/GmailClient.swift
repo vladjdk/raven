@@ -7,6 +7,8 @@ public protocol GmailAPI: Sendable {
   func thread(id: String) async throws -> Gmail.Thread
   func history(startHistoryID: String, pageToken: String?) async throws -> Gmail.HistoryList
   func modifyThread(id: String, add: Set<String>, remove: Set<String>) async throws
+  /// Sends a base64url-encoded RFC 822 message, optionally into an existing thread.
+  func send(raw: String, threadID: String?) async throws -> Gmail.SentMessage
 }
 
 public enum GmailError: Error, LocalizedError {
@@ -23,7 +25,15 @@ public enum GmailError: Error, LocalizedError {
 
   /// Worth retrying later (rate limits, server trouble, no network).
   public var isTransient: Bool {
-    if case .http(let status, _) = self { return status == 429 || status >= 500 }
+    if case .http(let status, let body) = self {
+      return status == 429 || status >= 500 || (status == 403 && body.contains("ateLimitExceeded"))
+    }
+    return false
+  }
+
+  /// The token was rejected; the user needs to sign in again.
+  public var isAuth: Bool {
+    if case .http(401, _) = self { return true }
     return false
   }
 }
@@ -69,6 +79,14 @@ public struct GmailClient: GmailAPI {
     }
     let body = try JSONEncoder().encode(Body(addLabelIds: add.sorted(), removeLabelIds: remove.sorted()))
     let _: Gmail.Thread = try await send("threads/\(id)/modify", method: "POST", body: body)
+  }
+
+  public func send(raw: String, threadID: String?) async throws -> Gmail.SentMessage {
+    struct Body: Encodable {
+      let raw: String
+      let threadId: String?
+    }
+    return try await send("messages/send", method: "POST", body: try JSONEncoder().encode(Body(raw: raw, threadId: threadID)))
   }
 
   private func get<T: Decodable>(_ path: String, _ query: [URLQueryItem] = []) async throws -> T {

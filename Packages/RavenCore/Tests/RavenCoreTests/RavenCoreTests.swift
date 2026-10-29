@@ -173,6 +173,13 @@ actor FakeGmail: GmailAPI {
     return try JSONDecoder().decode(Gmail.HistoryList.self, from: Data(#"{"historyId":"\#(historyID)"}"#.utf8))
   }
 
+  var sentRaw: [String] = []
+
+  func send(raw: String, threadID: String?) async throws -> Gmail.SentMessage {
+    sentRaw.append(raw)
+    return try JSONDecoder().decode(Gmail.SentMessage.self, from: Data(#"{"id":"s1","threadId":"\#(threadID ?? "new")"}"#.utf8))
+  }
+
   func modifyThread(id: String, add: Set<String>, remove: Set<String>) async throws {
     if let error = failNextModify {
       failNextModify = nil
@@ -253,5 +260,58 @@ final class SyncEngineTests: XCTestCase {
     XCTAssertEqual(sent.count, 1)
     XCTAssertEqual(sent.first?.0, "a")
     XCTAssertEqual(sent.first?.2, ["INBOX"])
+  }
+}
+
+final class ComposeTests: XCTestCase {
+  let me = Address(name: "You", email: "you@example.com")
+
+  func decode(_ raw: String) -> String {
+    MIME.base64URLDecode(raw) ?? ""
+  }
+
+  func testReplyAllThreadsAndSkipsMe() {
+    let original = Message(
+      id: "m", threadID: "t", from: Address(name: "Priya", email: "priya@example.com"),
+      to: [me, Address(email: "marcus@example.com")], cc: [Address(email: "PRIYA@example.com"), Address(email: "dana@example.com")],
+      date: Date(), subject: "Q4 review", snippet: "", bodyText: "Line one\nLine two",
+      messageIDHeader: "<a@mail>", references: "<root@mail>")
+    let draft = Draft.reply(to: original, all: true, me: "you@example.com")
+    XCTAssertEqual(draft.to.map(\.email), ["priya@example.com"])
+    XCTAssertEqual(draft.cc.map(\.email), ["marcus@example.com", "dana@example.com"])
+    XCTAssertEqual(draft.subject, "Re: Q4 review")
+    XCTAssertEqual(draft.inReplyTo, "<a@mail>")
+    XCTAssertEqual(draft.references, "<root@mail> <a@mail>")
+    XCTAssertEqual(Draft.reply(to: Message(id: "x", threadID: "t", from: me, date: Date(), subject: "Re: Hi", snippet: ""), all: false, me: me.email).subject, "Re: Hi")
+  }
+
+  func testComposeBuildsValidMessage() {
+    var draft = Draft(to: [Address(name: "Okafor, Dana", email: "dana@example.com")], subject: "Café ☕", body: "Hi Dana,\nSee you there.")
+    draft.inReplyTo = "<a@mail>"
+    let raw = decode(MIME.compose(draft, from: me, date: Date(timeIntervalSince1970: 0)))
+    XCTAssertTrue(raw.contains("To: \"Okafor, Dana\" <dana@example.com>\r\n"))
+    XCTAssertTrue(raw.contains("Subject: =?UTF-8?B?\(Data("Café ☕".utf8).base64EncodedString())?=\r\n"))
+    XCTAssertTrue(raw.contains("In-Reply-To: <a@mail>\r\n"))
+    let body = raw.components(separatedBy: "\r\n\r\n")[1].replacingOccurrences(of: "\r\n", with: "")
+    XCTAssertEqual(String(data: Data(base64Encoded: body)!, encoding: .utf8), "Hi Dana,\r\nSee you there.")
+  }
+
+  func testForwardQuotesOriginal() {
+    let original = Message(id: "m", threadID: "t", from: Address(name: "Sam", email: "sam@example.com"), date: Date(), subject: "Coffee", snippet: "", bodyText: "Tuesday?")
+    let draft = Draft.forward(original)
+    XCTAssertEqual(draft.subject, "Fwd: Coffee")
+    XCTAssertNil(draft.threadID)
+    XCTAssertTrue(MIME.quotedBlock(for: original, forwarding: true).contains("Tuesday?"))
+    XCTAssertFalse(Draft(to: [Address(email: "not-an-address")]).canSend)
+  }
+
+  func testSendGoesThroughEngine() async throws {
+    let gmail = FakeGmail()
+    await gmail.set(try SyncEngineTests.thread("t", subject: "Hello", labels: ["INBOX"]))
+    let engine = SyncEngine(store: try MailStore(url: nil), api: gmail)
+    try await engine.send(Draft(to: [Address(email: "a@example.com")], subject: "Re: Hello", body: "Yes", threadID: "t"), from: me)
+    let sent = await gmail.sentRaw
+    XCTAssertEqual(sent.count, 1)
+    XCTAssertTrue(decode(sent[0]).contains("Subject: Re: Hello"))
   }
 }

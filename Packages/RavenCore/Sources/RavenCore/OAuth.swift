@@ -139,6 +139,15 @@ public enum OAuthError: Error, LocalizedError {
   case tokenEndpoint(String)
   case notSignedIn
 
+  /// The refresh token was revoked or expired: only signing in again fixes it.
+  public var needsSignIn: Bool {
+    switch self {
+    case .notSignedIn: true
+    case .tokenEndpoint(let body): body.contains("invalid_grant")
+    default: false
+    }
+  }
+
   public var errorDescription: String? {
     switch self {
     case .denied(let reason): "Google sign-in was cancelled (\(reason))."
@@ -225,15 +234,26 @@ final class LoopbackServer: @unchecked Sendable {
   }
 
   func waitForRedirect() async throws -> [String: String] {
-    try await withCheckedThrowingContinuation { c in
-      lock.lock()
-      if let received {
-        lock.unlock()
-        c.resume(returning: received)
-      } else {
-        continuation = c
-        lock.unlock()
+    try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { c in
+        lock.lock()
+        if let received {
+          lock.unlock()
+          c.resume(returning: received)
+        } else if Task.isCancelled {
+          lock.unlock()
+          c.resume(throwing: CancellationError())
+        } else {
+          continuation = c
+          lock.unlock()
+        }
       }
+    } onCancel: {
+      lock.lock()
+      let c = continuation
+      continuation = nil
+      lock.unlock()
+      c?.resume(throwing: CancellationError())
     }
   }
 

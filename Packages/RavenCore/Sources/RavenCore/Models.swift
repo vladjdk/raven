@@ -34,11 +34,16 @@ public struct Message: Identifiable, Hashable, Sendable {
   public var bodyHTML: String?
   public var labels: Set<String>
   public var listID: String?
+  /// RFC 822 Message-ID and References headers, used to thread replies.
+  public var messageIDHeader: String?
+  public var references: String?
+  public var attachments: [Attachment]
 
   public init(
     id: String, threadID: String, from: Address, to: [Address] = [], cc: [Address] = [],
     date: Date, subject: String, snippet: String, bodyText: String? = nil, bodyHTML: String? = nil,
-    labels: Set<String> = [], listID: String? = nil
+    labels: Set<String> = [], listID: String? = nil, messageIDHeader: String? = nil, references: String? = nil,
+    attachments: [Attachment] = []
   ) {
     self.id = id
     self.threadID = threadID
@@ -52,9 +57,24 @@ public struct Message: Identifiable, Hashable, Sendable {
     self.bodyHTML = bodyHTML
     self.labels = labels
     self.listID = listID
+    self.messageIDHeader = messageIDHeader
+    self.references = references
+    self.attachments = attachments
   }
 
   public var isUnread: Bool { labels.contains(Label.unread) }
+}
+
+public struct Attachment: Hashable, Sendable, Codable {
+  public var filename: String
+  public var mimeType: String
+  public var size: Int
+
+  public init(filename: String, mimeType: String, size: Int) {
+    self.filename = filename
+    self.mimeType = mimeType
+    self.size = size
+  }
 }
 
 /// A conversation as shown in the inbox list. Derived from its messages.
@@ -167,13 +187,17 @@ public enum MailAction: Codable, Hashable, Sendable {
   case markUnread(threadID: String)
   case snooze(threadID: String, until: Date)
   case unsnooze(threadID: String)
+  /// Exact label changes, used by undo to restore a thread's previous state.
+  case relabel(threadID: String, add: Set<String>, remove: Set<String>)
+  /// Forgets a snooze without touching labels (undoing a snooze).
+  case clearSnooze(threadID: String)
 
   public var threadID: String {
     switch self {
     case .archive(let id), .unarchive(let id), .trash(let id), .untrash(let id),
-      .markRead(let id), .markUnread(let id), .unsnooze(let id):
+      .markRead(let id), .markUnread(let id), .unsnooze(let id), .clearSnooze(let id):
       id
-    case .snooze(let id, _):
+    case .snooze(let id, _), .relabel(let id, _, _):
       id
     }
   }
@@ -189,6 +213,8 @@ public enum MailAction: Codable, Hashable, Sendable {
     case .markUnread(let id): .markRead(threadID: id)
     case .snooze(let id, _): .unsnooze(threadID: id)
     case .unsnooze(let id): .archive(threadID: id)
+    case .relabel(let id, let add, let remove): .relabel(threadID: id, add: remove, remove: add)
+    case .clearSnooze: self
     }
   }
 
@@ -202,6 +228,14 @@ public enum MailAction: Codable, Hashable, Sendable {
     case .untrash: ([Label.inbox], [Label.trash])
     case .markRead: ([], [Label.unread])
     case .markUnread: ([Label.unread], [])
+    case .relabel(_, let add, let remove): (add, remove)
+    case .clearSnooze: ([], [])
     }
+  }
+
+  /// Whether this action changes anything on the server (snooze bookkeeping is local).
+  public var touchesServer: Bool {
+    let (add, remove) = labelChanges
+    return !add.isEmpty || !remove.isEmpty
   }
 }

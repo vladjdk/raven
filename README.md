@@ -2,7 +2,19 @@
 
 A fast, keyboard-first, agent-forward email client for macOS. Native SwiftUI, local-first, open source.
 
-> Early days: there's a spec and designs, and code is next. See [docs/SPEC.md](docs/SPEC.md).
+> Early days (v0.1). See [docs/SPEC.md](docs/SPEC.md) for the plan.
+
+## Build
+
+```bash
+brew install xcodegen
+xcodegen generate
+open Raven.xcodeproj
+```
+
+Run with `--demo` (or click **Explore with sample mail**) to try it without a Google account.
+To sign in with Gmail, create a Google Cloud OAuth client of type *Desktop app* with the Gmail API enabled,
+and put its id and secret in `Config/Secrets.xcconfig` (see the example file).
 
 - **Instant:** every action is local first, with sync afterward.
 - **Keyboard everything:** `j/k`, `e`, `h`, `⌘K`.

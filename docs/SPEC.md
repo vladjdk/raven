@@ -51,25 +51,14 @@ The agent runtime is [nanocode-swift](https://github.com/gakonst/nanocode-swift)
 
 - **`Nanocode`** (`NanocodeRuntime`, `Session`, `Chat`) runs the agent in-process. Every turn is journaled in a local SQLite file, so a turn the app was killed in the middle of resumes from its checkpoint.
 - **`NanocodeViews` / `NanocodeCore`**: SwiftUI views and a transcript model, used for the agent pane, styled to match Raven rather than nanocode's stock skins.
-- **`SessionConfiguration`** gives the agent Raven's instructions, a **workspace directory** (the mailbox mirror, 4.2) and Raven's **host tools** (4.3). We don't give it shell, network or general filesystem tools, so the only things it can touch are the tools we hand it.
+- **`SessionConfiguration`** gives the agent Raven's instructions and **host tools** (4.3), and no workspace (4.2). We don't give it shell, network or general filesystem tools, so the only things it can touch are the tools we hand it.
 - **Code Mode** (nanocode's embedded QuickJS) is on, so a request like "archive every newsletter from this week except X" can run as one JS cell that calls our host tools in a loop, instead of 40 separate model turns. It's faster, cheaper, and gives one diff to review.
 
 Pinned in `Package.swift` to an exact revision. Upgrades are deliberate PRs.
 
-### 4.2 Mailbox mirror (workspace)
+### 4.2 No workspace
 
-The app keeps a read-only mirror of the hot set of mail (inbox, plus the last N days) as the session's workspace, so the agent can read and search mail the same way it reads files:
-
-```
-mailfs/
-  inbox/2026-10-28_q4-roadmap_<threadid>.md   # YAML front matter + plain-text body, quoted text trimmed
-  snoozed/…   labels/<label>/…
-  drafts/<draftid>.md                          # written only through tools, never directly
-  contacts.md                                  # recent correspondents
-  me.md                                        # your voice/style notes (you edit this)
-```
-
-Front matter: `id, thread_id, from, to, cc, date, labels, unread, has_attachments, list_id`.
+The agent session has no workspace directory, so nanocode gives it no shell, file, web or subagent tools. It reads mail only through `search_mail`, `list_inbox` and `read_thread`, which query the local SQLite store. (An earlier draft mirrored mail as markdown files; tools turned out simpler and safer.)
 
 ### 4.3 Host tools
 
@@ -77,15 +66,15 @@ Every action the agent takes goes through a `HostTool` implemented in Swift. Eac
 
 | Tool | Effect |
 |---|---|
-| `search_mail(query)` | Local FTS5 search, results as thread ids + front matter |
-| `read_thread(id)` | Full thread as markdown |
+| `search_mail(query)` | Local FTS5 search, results as thread ids, sender, subject, date, tab |
+| `list_inbox(tab?)` | Inbox threads, optionally one split-inbox tab |
+| `read_thread(id)` | Full thread as plain text |
 | `archive(ids)` / `trash(ids)` | Queued, undoable |
 | `label(ids, add, remove)` | Queued, undoable |
 | `snooze(ids, when)` | Natural-language time, parsed by the app |
-| `draft(reply_to?, to, subject, body)` | Creates a draft and shows it to you as a **proposal** card |
-| `open(id)` | Focuses the thread in the UI |
+| `draft_reply(thread_id, body, reply_all?)` | Opens the reply composer with that text for you to review |
 
-There's **no send tool.** Every draft the agent writes becomes a proposal, and you press `⌘⏎` to send it.
+There's **no send tool.** A draft the agent writes opens in the composer, and you press `⌘⏎` to send it. Everything one request changes is a single Undo.
 
 ### 4.4 Ways in
 
@@ -124,7 +113,7 @@ There's **no send tool.** Every draft the agent writes becomes a proposal, and y
 
 1. **Skeleton:** Xcode project, `RavenCore` package, Google sign-in, sync inbox into SQLite, read-only list + thread view, `j/k/e`.
 2. **Daily-driver:** compose/reply, undo send, snooze, split inbox, search, `⌘K`.
-3. **Agent:** nanocode-swift runtime, mailbox mirror, host tools, proposals, activity log.
+3. **Agent:** nanocode-swift runtime, host tools, "Do it" requests in ⌘K, one-step undo. Activity log and autopilot rules next.
 4. **More providers:** JMAP, IMAP, multiple accounts.
 5. **Autopilot & iOS.**
 

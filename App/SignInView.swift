@@ -22,7 +22,7 @@ struct SignInView: View {
       VStack(spacing: 10) {
         if model.oauth != nil {
           Button {
-            Task { await model.signIn() }
+            model.signIn()
           } label: {
             HStack(spacing: 8) {
               if model.phase == .signingIn {
@@ -36,12 +36,21 @@ struct SignInView: View {
           }
           .buttonStyle(PrimaryButtonStyle())
           .disabled(model.phase == .signingIn)
+          if model.phase == .signingIn {
+            Button("Cancel") { model.cancelSignIn() }
+              .buttonStyle(.plain)
+              .font(.system(size: 12))
+              .foregroundStyle(Theme.secondary)
+              .transition(.opacity)
+          }
         } else {
-          Text("Google sign-in isn't configured in this build.\nAdd your OAuth client to Config/Secrets.xcconfig.")
-            .multilineTextAlignment(.center)
-            .font(.callout)
-            .foregroundStyle(Theme.secondary)
-            .frame(maxWidth: 360)
+          #if DEBUG
+            Text("Google sign-in isn't set up in this build.\nAdd your OAuth client to Config/Secrets.xcconfig.")
+              .multilineTextAlignment(.center)
+              .font(.callout)
+              .foregroundStyle(Theme.secondary)
+              .frame(maxWidth: 360)
+          #endif
         }
         Button("Explore with sample mail") { Task { await model.startDemo() } }
           .buttonStyle(SecondaryButtonStyle())
@@ -50,7 +59,7 @@ struct SignInView: View {
       if let error = model.errorMessage {
         Text(error)
           .font(.callout)
-          .foregroundStyle(.red)
+          .foregroundStyle(Color(hex: 0xB91C1C))
           .frame(maxWidth: 420)
           .multilineTextAlignment(.center)
       }
@@ -59,6 +68,7 @@ struct SignInView: View {
         .font(.footnote)
         .foregroundStyle(Theme.tertiary)
     }
+    .animation(Motion.state, value: model.phase)
     .padding(48)
     .frame(width: 520)
     .background(Theme.panel, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -71,8 +81,14 @@ struct PrimaryButtonStyle: ButtonStyle {
     configuration.label
       .font(.system(size: 13, weight: .semibold))
       .foregroundStyle(.white)
-      .background(Theme.accent.opacity(configuration.isPressed ? 0.85 : 1), in: RoundedRectangle(cornerRadius: 10))
-      .shadow(color: .black.opacity(0.15), radius: 1, y: 1)
+      .background(
+        RoundedRectangle(cornerRadius: 10)
+          .fill(Theme.accent)
+          .brightness(configuration.isPressed ? -0.08 : 0)
+          .shadow(color: .black.opacity(0.15), radius: 1, y: 1)
+      )
+      .scaleEffect(configuration.isPressed ? 0.98 : 1)
+      .animation(Motion.hover, value: configuration.isPressed)
   }
 }
 
@@ -85,6 +101,7 @@ struct SecondaryButtonStyle: ButtonStyle {
       .frame(height: 34)
       .background(configuration.isPressed ? Theme.fill : .white, in: RoundedRectangle(cornerRadius: 10))
       .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border))
+      .animation(Motion.hover, value: configuration.isPressed)
   }
 }
 
@@ -93,17 +110,20 @@ struct IconButton: View {
   let systemName: String
   let label: String
   let action: () -> Void
+  @State private var hovered = false
 
   var body: some View {
     Button(action: action) {
       Image(systemName: systemName)
         .font(.system(size: 14, weight: .medium))
-        .foregroundStyle(Theme.secondary)
+        .foregroundStyle(hovered ? Theme.ink : Theme.secondary)
         .frame(width: 32, height: 32)
+        .background(hovered ? Theme.fill : .clear, in: RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
     }
-    .buttonStyle(.plain)
+    .buttonStyle(PressableStyle())
     .help(label)
     .accessibilityLabel(label)
+    .onHover { h in withAnimation(Motion.hover) { hovered = h } }
   }
 }

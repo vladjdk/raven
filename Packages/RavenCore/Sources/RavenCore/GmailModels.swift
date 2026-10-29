@@ -67,6 +67,11 @@ public enum Gmail {
     public let nextPageToken: String?
   }
 
+  public struct SentMessage: Decodable, Sendable {
+    public let id: String
+    public let threadId: String
+  }
+
   public struct Profile: Decodable, Sendable {
     public let emailAddress: String
     public let historyId: String
@@ -94,7 +99,10 @@ extension Message {
       bodyText: bodies.text,
       bodyHTML: bodies.html,
       labels: Set(m.labelIds ?? []),
-      listID: header("List-Id") ?? header("List-Unsubscribe")
+      listID: header("List-Id") ?? header("List-Unsubscribe"),
+      messageIDHeader: header("Message-ID") ?? header("Message-Id"),
+      references: header("References"),
+      attachments: MIME.attachments(of: m.payload)
     )
   }
 }
@@ -117,6 +125,18 @@ public enum MIME {
     }
     if let part { walk(part) }
     return (text, html)
+  }
+
+  public static func attachments(of part: Gmail.Part?) -> [Attachment] {
+    var result: [Attachment] = []
+    func walk(_ p: Gmail.Part) {
+      if let name = p.filename, !name.isEmpty {
+        result.append(Attachment(filename: name, mimeType: p.mimeType ?? "application/octet-stream", size: p.body?.size ?? 0))
+      }
+      p.parts?.forEach(walk)
+    }
+    if let part { walk(part) }
+    return result
   }
 
   public static func base64URLDecode(_ string: String) -> String? {

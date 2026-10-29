@@ -13,6 +13,10 @@ public actor MailStore {
     }
     db = try Database(path: url?.path)
     try db.executeScript(Self.schema)
+    // Columns added after v0.1's first schema; ignore "duplicate column" on newer databases.
+    for column in ["message_id_header TEXT", "refs TEXT", "attachments_json TEXT"] {
+      try? db.execute("ALTER TABLE messages ADD COLUMN \(column)")
+    }
   }
 
   private static let schema = """
@@ -25,7 +29,8 @@ public actor MailStore {
       subject TEXT NOT NULL, snippet TEXT NOT NULL,
       body_text TEXT, body_html TEXT,
       labels TEXT NOT NULL,
-      list_id TEXT
+      list_id TEXT,
+      message_id_header TEXT, refs TEXT, attachments_json TEXT
     );
     CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id, date);
     CREATE TABLE IF NOT EXISTS threads (
@@ -57,14 +62,16 @@ public actor MailStore {
         try db.execute(
           """
           INSERT OR REPLACE INTO messages
-            (id, thread_id, from_name, from_email, to_json, cc_json, date, subject, snippet, body_text, body_html, labels, list_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, thread_id, from_name, from_email, to_json, cc_json, date, subject, snippet, body_text, body_html, labels, list_id,
+             message_id_header, refs, attachments_json)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           """,
           [
             .text(m.id), .text(m.threadID), SQLValue(m.from.name), .text(m.from.email),
             .text(try json(m.to)), .text(try json(m.cc)), SQLValue(m.date),
             .text(m.subject), .text(m.snippet), SQLValue(m.bodyText), SQLValue(m.bodyHTML),
             .text(Self.encode(m.labels)), SQLValue(m.listID),
+            SQLValue(m.messageIDHeader), SQLValue(m.references), .text(try json(m.attachments)),
           ])
         try db.execute("DELETE FROM search WHERE message_id = ?", [.text(m.id)])
         try db.execute(
@@ -123,13 +130,27 @@ public actor MailStore {
       switch action {
       case .snooze(_, let until):
         try db.execute("INSERT OR REPLACE INTO snoozes (thread_id, until) VALUES (?, ?)", [.text(id), SQLValue(until)])
-      case .unsnooze, .archive, .trash:
+      case .unsnooze, .archive, .trash, .clearSnooze:
         try db.execute("DELETE FROM snoozes WHERE thread_id = ?", [.text(id)])
       default:
         break
       }
       try refreshThread(id)
     }
+  }
+
+  /// Raw labels of each message in a thread plus its snooze, so undo can put things back exactly.
+  public struct ThreadState: Sendable, Hashable {
+    public let labels: [String: Set<String>]
+    public let snoozedUntil: Date?
+  }
+
+  public func state(threadID: String) throws -> ThreadState {
+    let rows = try db.query("SELECT id, labels FROM messages WHERE thread_id = ?", [.text(threadID)])
+    var labels: [String: Set<String>] = [:]
+    for row in rows { if let id = row.string("id") { labels[id] = Self.decode(row.string("labels") ?? "") } }
+    let until = try db.query("SELECT until FROM snoozes WHERE thread_id = ?", [.text(threadID)]).first?.date("until")
+    return ThreadState(labels: labels, snoozedUntil: until)
   }
 
   /// Snoozed threads whose time has come.
@@ -202,7 +223,9 @@ public actor MailStore {
 
   /// Full-text search over subject, sender and body. Each word matches as a prefix.
   public func search(_ text: String, limit: Int = 100) throws -> [MailThread] {
-    let terms = text.split(whereSeparator: \.isWhitespace).map { word in
+    let terms = text.split(whereSeparator: \.isWhitespace)
+      .filter { $0.contains(where: { $0.isLetter || $0.isNumber }) }
+      .map { word in
       "\"" + word.replacingOccurrences(of: "\"", with: "\"\"") + "\"*"
     }
     guard !terms.isEmpty else { return [] }
@@ -283,7 +306,10 @@ public actor MailStore {
       bodyText: row.string("body_text"),
       bodyHTML: row.string("body_html"),
       labels: Self.decode(row.string("labels") ?? ""),
-      listID: row.string("list_id")
+      listID: row.string("list_id"),
+      messageIDHeader: row.string("message_id_header"),
+      references: row.string("refs"),
+      attachments: row.string("attachments_json").flatMap { try? decoder.decode([Attachment].self, from: Data($0.utf8)) } ?? []
     )
   }
 

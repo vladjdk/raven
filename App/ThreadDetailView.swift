@@ -11,15 +11,29 @@ struct ThreadDetailView: View {
       HStack(spacing: 4) {
         IconButton(systemName: "chevron.left", label: "Back (Esc)") { model.closeThread() }
         Spacer()
-        IconButton(systemName: "checkmark", label: "Mark done (E)") { Task { await model.archive() } }
+        IconButton(systemName: "arrowshape.turn.up.left", label: "Reply (R)") { model.reply(all: false) }
+        IconButton(systemName: "arrowshape.turn.up.left.2", label: "Reply all (A)") { model.reply(all: true) }
+        IconButton(systemName: "arrowshape.turn.up.right", label: "Forward (F)") { model.forward() }
+        Divider().frame(height: 18).padding(.horizontal, 6)
+        let primary = model.primaryActionTitle(for: model.openThread)
+        IconButton(systemName: primary.systemImage, label: primary.title == "Mark done" ? "Mark done (E): moves it out of the Inbox" : "\(primary.title) (E)") {
+          Task { await model.primaryAction() }
+        }
         IconButton(systemName: "clock", label: "Snooze (H)") { model.isSnoozePickerOpen = true }
-        IconButton(systemName: "envelope.badge", label: "Mark unread (U)") { Task { await model.toggleRead() } }
-        IconButton(systemName: "trash", label: "Trash (#)") { Task { await model.trash() } }
+        IconButton(
+          systemName: model.openThread?.isUnread == true ? "envelope.open" : "envelope.badge",
+          label: model.openThread?.isUnread == true ? "Mark as read (U)" : "Mark as unread (U)"
+        ) { Task { await model.toggleRead() } }
+        IconButton(systemName: "trash", label: "Move to Trash (#)") { Task { await model.trash() } }
       }
       .padding(.horizontal, 16)
       .frame(height: 52)
       Divider().overlay(Theme.hairline)
+      if let error = model.errorMessage {
+        ErrorBanner(message: error).transition(.move(edge: .top).combined(with: .opacity))
+      }
 
+      ScrollViewReader { proxy in
       ScrollView {
         VStack(alignment: .leading, spacing: 18) {
           if let thread = model.openThread {
@@ -37,24 +51,86 @@ struct ThreadDetailView: View {
           ForEach(model.openMessages) { message in
             if isExpanded(message) {
               MessageCard(message: message)
+                .transition(.opacity)
             } else {
               CollapsedMessage(message: message)
-                .onTapGesture { expanded.insert(message.id) }
+                .onTapGesture { withAnimation(Motion.state) { _ = expanded.insert(message.id) } }
+                .help("Show this message")
             }
           }
+
+          if let draft = model.draft, model.showsInlineComposer {
+            ComposerView(draft: Binding(get: { model.draft ?? draft }, set: { model.draft = $0 }), inline: true)
+              .id(draft.id)
+              .transition(.move(edge: .bottom).combined(with: .opacity))
+              .onAppear { withAnimation(Motion.panel) { proxy.scrollTo("composer", anchor: .bottom) } }
+          } else {
+            ReplyBar()
+              .transition(.opacity)
+          }
+          Color.clear.frame(height: 1).id("composer")
         }
         .frame(maxWidth: 720, alignment: .leading)
         .padding(.horizontal, 32)
         .padding(.vertical, 32)
         .frame(maxWidth: .infinity)
       }
+      // Each thread starts at the top rather than at the last one's scroll offset.
+      .id(model.openThread?.id)
+      }
     }
-    .onChange(of: model.openThread?.id) { expanded = [] }
+    .animation(Motion.state, value: model.errorMessage)
+    .onChange(of: model.openThread?.id, initial: true) {
+      // Decide once, on open, which messages start expanded; marking read must not collapse them.
+      expanded = Set(model.openMessages.filter(\.isUnread).map(\.id))
+    }
   }
 
-  /// The newest message and any unread ones start open; earlier ones collapse to a line.
+  /// The newest message and any that were unread when opened start open; earlier ones collapse.
   private func isExpanded(_ message: Message) -> Bool {
-    message.id == model.openMessages.last?.id || message.isUnread || expanded.contains(message.id)
+    message.id == model.openMessages.last?.id || expanded.contains(message.id)
+  }
+}
+
+/// The quiet "Reply / Reply all / Forward" row under a thread, so replying is obvious.
+struct ReplyBar: View {
+  @Environment(AppModel.self) private var model
+
+  var body: some View {
+    HStack(spacing: 8) {
+      ReplyButton(title: "Reply", key: "R", systemImage: "arrowshape.turn.up.left") { model.reply(all: false) }
+      if (model.openMessages.last.map { $0.to.count + $0.cc.count } ?? 0) > 1 {
+        ReplyButton(title: "Reply all", key: "A", systemImage: "arrowshape.turn.up.left.2") { model.reply(all: true) }
+      }
+      ReplyButton(title: "Forward", key: "F", systemImage: "arrowshape.turn.up.right") { model.forward() }
+      Spacer()
+    }
+  }
+}
+
+struct ReplyButton: View {
+  let title: String
+  let key: String
+  let systemImage: String
+  let action: () -> Void
+  @State private var hovered = false
+
+  var body: some View {
+    Button(action: action) {
+      HStack(spacing: 8) {
+        Image(systemName: systemImage).font(.system(size: 12, weight: .semibold))
+        Text(title).font(.system(size: 13, weight: .medium))
+        KeyCap(label: key)
+      }
+      .foregroundStyle(Theme.ink)
+      .padding(.leading, 14)
+      .padding(.trailing, 8)
+      .frame(height: 36)
+      .background(hovered ? Theme.fill : .white, in: RoundedRectangle(cornerRadius: 10))
+      .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border))
+    }
+    .buttonStyle(PressableStyle())
+    .onHover { h in withAnimation(Motion.hover) { hovered = h } }
   }
 }
 
@@ -74,6 +150,7 @@ struct Chip: View {
 
 struct CollapsedMessage: View {
   let message: Message
+  @State private var hovered = false
 
   var body: some View {
     HStack(spacing: 12) {
@@ -88,8 +165,10 @@ struct CollapsedMessage: View {
     .font(.system(size: 13))
     .padding(.horizontal, 16)
     .padding(.vertical, 12)
-    .background(Color(hex: 0xFAFAFB), in: RoundedRectangle(cornerRadius: 12))
+    .background(hovered ? Theme.fill : Color(hex: 0xFAFAFB), in: RoundedRectangle(cornerRadius: 12))
+    .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color(hex: 0xEEEEF1)))
     .contentShape(Rectangle())
+    .onHover { h in withAnimation(Motion.hover) { hovered = h } }
   }
 }
 
@@ -121,6 +200,21 @@ struct MessageCard: View {
       } else {
         Text(message.snippet).foregroundStyle(Theme.secondary)
       }
+      if !message.attachments.isEmpty {
+        HStack(spacing: 8) {
+          ForEach(message.attachments, id: \.self) { file in
+            HStack(spacing: 6) {
+              Image(systemName: "paperclip").font(.system(size: 11, weight: .semibold))
+              Text(file.filename).lineLimit(1)
+              Text(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file)).foregroundStyle(Theme.tertiary)
+            }
+            .font(.system(size: 12))
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(Theme.fill, in: RoundedRectangle(cornerRadius: 8))
+          }
+        }
+      }
     }
     .padding(20)
     .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color(hex: 0xEEEEF1)))
@@ -137,14 +231,17 @@ struct MessageCard: View {
 struct SafeHTMLView: NSViewRepresentable {
   let html: String
   @State private var height: CGFloat = 120
+  @State private var measured = false
 
-  func makeCoordinator() -> Coordinator { Coordinator(height: $height) }
+  func makeCoordinator() -> Coordinator { Coordinator(height: $height, measured: $measured) }
 
   func makeNSView(context: Context) -> WKWebView {
     let config = WKWebViewConfiguration()
     config.defaultWebpagePreferences.allowsContentJavaScript = false
     config.websiteDataStore = .nonPersistent()
     let view = WKWebView(frame: .zero, configuration: config)
+    view.appearance = NSAppearance(named: .aqua)
+    view.alphaValue = 0  // Revealed once measured, so it doesn't jump from a placeholder height.
     view.navigationDelegate = context.coordinator
     view.setValue(false, forKey: "drawsBackground")
     BlockRemoteContent.install(on: config.userContentController) {
@@ -153,7 +250,14 @@ struct SafeHTMLView: NSViewRepresentable {
     return view
   }
 
-  func updateNSView(_ view: WKWebView, context: Context) {}
+  func updateNSView(_ view: WKWebView, context: Context) {
+    if measured && view.alphaValue == 0 {
+      NSAnimationContext.runAnimationGroup { ctx in
+        ctx.duration = 0.2
+        view.animator().alphaValue = 1
+      }
+    }
+  }
 
   func sizeThatFits(_ proposal: ProposedViewSize, nsView: WKWebView, context: Context) -> CGSize? {
     CGSize(width: proposal.width ?? 600, height: height)
@@ -161,11 +265,18 @@ struct SafeHTMLView: NSViewRepresentable {
 
   final class Coordinator: NSObject, WKNavigationDelegate {
     var height: Binding<CGFloat>
-    init(height: Binding<CGFloat>) { self.height = height }
+    var measured: Binding<Bool>
+    init(height: Binding<CGFloat>, measured: Binding<Bool>) {
+      self.height = height
+      self.measured = measured
+    }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
       webView.evaluateJavaScript("document.documentElement.scrollHeight") { value, _ in
-        if let h = value as? CGFloat { DispatchQueue.main.async { self.height.wrappedValue = h } }
+        DispatchQueue.main.async {
+          if let h = value as? CGFloat { self.height.wrappedValue = h }
+          self.measured.wrappedValue = true
+        }
       }
     }
 

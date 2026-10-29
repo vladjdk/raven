@@ -19,6 +19,7 @@ public actor SyncEngine {
   public func sync() async throws {
     try await flushOutbox()
     try await wakeSnoozes()
+    defer { Task { try? await self.reapplyPending() } }
     if let historyID = try await store.meta("historyId") {
       do {
         try await incremental(from: historyID)
@@ -30,11 +31,27 @@ public actor SyncEngine {
     try await fullSync()
   }
 
+  /// A pull overwrites local labels with the server's. Actions still waiting in the outbox
+  /// haven't reached the server yet, so apply them again on top.
+  private func reapplyPending() async throws {
+    for pending in try await store.pendingActions() {
+      try await store.apply(pending.action)
+    }
+  }
+
   /// Applies an action locally right away, then queues it for the server.
   public func perform(_ action: MailAction) async throws {
     try await store.apply(action)
+    guard action.touchesServer else { return }
     try await store.enqueue(action)
     Task { try? await self.flushOutbox() }
+  }
+
+  /// Sends a draft and pulls the sent message back into its thread.
+  public func send(_ draft: Draft, from: Address) async throws {
+    let sent = try await api.send(raw: MIME.compose(draft, from: from), threadID: draft.threadID)
+    // It's sent. If pulling it back fails, the next sync picks it up; never report a sent mail as failed.
+    try? await fetchThreads([sent.threadId])
   }
 
   public func fullSync() async throws {
@@ -111,11 +128,17 @@ public actor SyncEngine {
       do {
         try await api.modifyThread(id: pending.action.threadID, add: add, remove: remove)
         try await store.completeAction(id: pending.id)
-      } catch let error as GmailError where error.isTransient {
+      } catch let error as GmailError where error.isTransient || error.isAuth {
         try await store.failAction(id: pending.id)
+        if error.isAuth { throw error }
         return
       } catch is URLError {
         try await store.failAction(id: pending.id)
+        return
+      } catch let error as OAuthError {
+        // Can't get a token (revoked, offline): keep everything queued and let the app re-auth.
+        throw error
+      } catch is CancellationError {
         return
       } catch {
         // A permanent error (e.g. the thread is gone): drop it rather than block the queue.
