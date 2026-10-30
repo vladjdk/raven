@@ -15,7 +15,7 @@ struct RavenApp: App {
         .task {
           delegate.model = model
           #if DEBUG
-            if SnapshotRunner.outputDirectory != nil { return }
+            if SnapshotRunner.outputDirectory != nil || SnapshotRunner.isAgentSmoke { return }
           #endif
           await model.start()
         }
@@ -39,6 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     #if DEBUG
       if let dir = SnapshotRunner.outputDirectory {
         Task { @MainActor in await SnapshotRunner.run(model: AppModel(), into: dir) }
+      } else if SnapshotRunner.isAgentSmoke {
+        Task { @MainActor in await SnapshotRunner.runAgentSmoke(model: AppModel()) }
       }
     #endif
   }

@@ -14,6 +14,19 @@
       return FileManager.default.temporaryDirectory.appendingPathComponent(args[i + 1], isDirectory: true)
     }
 
+    /// `Raven --agent-smoke` runs one request against the real runtime with a key that can't work,
+    /// to prove the runtime starts and reaches the API inside the sandbox. Writes the outcome and quits.
+    static var isAgentSmoke: Bool { CommandLine.arguments.contains("--agent-smoke") }
+
+    static func runAgentSmoke(model: AppModel) async {
+      await model.startDemo()
+      model.assistant.keyOverride = "invalid-key-for-smoke-test"
+      await model.assistant.run("Archive the newsletters")
+      let out = FileManager.default.temporaryDirectory.appendingPathComponent("agent-smoke.txt")
+      try? "\(model.assistant.state)\nsteps: \(model.assistant.steps)\n".write(to: out, atomically: true, encoding: .utf8)
+      NSApp.terminate(nil)
+    }
+
     static func run(model: AppModel, into dir: URL) async {
       try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
       await model.startDemo()

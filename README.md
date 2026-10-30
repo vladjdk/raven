@@ -8,9 +8,12 @@ A fast, keyboard-first, agent-forward email client for macOS. Native SwiftUI, lo
 
 ```bash
 brew install xcodegen
+scripts/bootstrap-nanocode.sh   # fetches the pinned agent runtime into Vendor/ and checks its SHA-256
 xcodegen generate
 open Raven.xcodeproj
 ```
+
+Plain-English requests in ⌘K (“archive the newsletters except The Weekly Byte”) need an Anthropic API key, added in Settings. It's stored in your Keychain.
 
 Run with `--demo` (or click **Explore with sample mail**) to try it without a Google account.
 To sign in with Gmail, create a Google Cloud OAuth client of type *Desktop app* with the Gmail API enabled,

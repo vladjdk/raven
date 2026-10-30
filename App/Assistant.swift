@@ -39,7 +39,15 @@ final class Assistant {
 
   var hasAPIKey: Bool { apiKey != nil }
 
+  #if DEBUG
+    /// Lets `--agent-smoke` exercise the runtime without touching the Keychain.
+    @ObservationIgnored var keyOverride: String?
+  #endif
+
   private var apiKey: String? {
+    #if DEBUG
+      if let keyOverride { return keyOverride }
+    #endif
     guard let data = try? app?.keychain.get(Self.keychainAccount) else { return nil }
     let key = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     return key.isEmpty ? nil : key
@@ -104,7 +112,7 @@ final class Assistant {
         case .turn(let json):
           let report = TurnReport(json)
           if let error = report.error {
-            state = .failed(error)
+            state = .failed(Self.friendly(error))
           } else {
             state = .done(report.message ?? "Done.")
           }
@@ -118,11 +126,25 @@ final class Assistant {
       }
       if isRunning { state = .failed("Stopped before finishing. Nothing else was changed.") }
     } catch {
-      state = .failed(error.localizedDescription)
+      state = .failed(Self.friendly(String(describing: error)))
     }
     #else
     state = .failed("Requests aren't included in this build yet.")
     #endif
+  }
+
+  /// Provider errors arrive as raw HTTP bodies; say what to do instead.
+  static func friendly(_ raw: String) -> String {
+    let text = raw.lowercased()
+    if text.contains("401") || text.contains("authentication_error") || text.contains("x-api-key") {
+      return "That key didn't work. Check it in Settings."
+    }
+    if text.contains("429") || text.contains("rate_limit") { return "Too many requests right now. Try again in a minute." }
+    if text.contains("529") || text.contains("overloaded") { return "The service is busy. Try again in a moment." }
+    if text.contains("offline") || text.contains("network") || text.contains("timed out") {
+      return "Couldn't connect. Check your internet connection."
+    }
+    return "Something went wrong. Nothing else was changed."
   }
 
   func note(_ step: String) {

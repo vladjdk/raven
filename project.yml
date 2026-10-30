@@ -10,10 +10,9 @@ configFiles:
 packages:
   RavenCore:
     path: Packages/RavenCore
-  # Agent runtime (MIT/Apache-2.0). Off until its prebuilt binary is approved for this build:
-  # run scripts/bootstrap-nanocode.sh, then uncomment this and the dependency below.
-  # Nanocode:
-  #   path: Vendor/nanocode-swift
+  # Agent runtime (MIT/Apache-2.0). Fetch it first with scripts/bootstrap-nanocode.sh (checksum-verified).
+  Nanocode:
+    path: Vendor/nanocode-swift
 targets:
   Raven:
     type: application
@@ -21,8 +20,8 @@ targets:
     sources: [App]
     dependencies:
       - package: RavenCore
-      # - package: Nanocode
-      #   product: Nanocode
+      - package: Nanocode
+        product: Nanocode
     info:
       path: App/Info.plist
       properties:
