@@ -24,6 +24,17 @@ and put its id and secret in `Config/Secrets.xcconfig` (see the example file).
 - **Agent built in:** an embedded [nanocode](https://github.com/gakonst/nanocode-swift) agent that triages and drafts using the same tools you do. It never sends without you.
 - **No server:** your mail goes from your provider to your Mac. Keys live in the Keychain.
 
+## Shortcuts
+
+| Key | Action | Key | Action |
+| --- | --- | --- | --- |
+| `j` / `k` | Next / previous | `r` / `a` / `f` | Reply / all / forward |
+| `⏎` | Open thread | `c` | New message |
+| `e` | Done (or back to inbox) | `⌘⏎` | Send |
+| `h` | Snooze | `z` | Undo, including send |
+| `u` | Read / unread | `/` | Search |
+| `#` | Trash | `⌘K` | Everything else |
+
 ## Contributing: secrets
 
 This repo is public. Before your first commit:
