@@ -415,9 +415,9 @@ struct ErrorBanner: View {
       Text(message).lineLimit(2).font(.system(size: 13))
       Spacer()
       if model.needsReauth {
-        Button("Sign in again") { model.signIn() }
+        Button("Sign in again") { model.signIn(as: model.activeEmail) }
           .buttonStyle(SecondaryButtonStyle())
-      } else if !model.isDemo {
+      } else {
         Button("Try again") { Task { await model.syncNow() } }
           .buttonStyle(SecondaryButtonStyle())
       }

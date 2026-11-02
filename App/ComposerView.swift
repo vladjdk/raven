@@ -112,6 +112,13 @@ struct ComposerView: View {
       Image(systemName: draft.kind == .forward ? "arrowshape.turn.up.right" : (draft.kind == .new ? "square.and.pencil" : "arrowshape.turn.up.left"))
         .font(.system(size: 12, weight: .medium))
       Text(title).font(.system(size: 12, weight: .semibold))
+      if model.showsFromAccount, let from = model.activeEmail {
+        Text("from \(from)")
+          .font(.system(size: 12))
+          .lineLimit(1)
+          .truncationMode(.middle)
+          .help("Sent from the account you're viewing. Switch accounts in the sidebar.")
+      }
       Spacer()
       Button {
         model.closeComposer()

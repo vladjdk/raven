@@ -20,8 +20,11 @@
 
     static func runAgentSmoke(model: AppModel) async {
       await model.startDemo()
+      let saved = model.assistant.settings
+      model.assistant.settings.access = .apiKey
       model.assistant.keyOverride = "invalid-key-for-smoke-test"
       await model.assistant.run("Archive the newsletters")
+      model.assistant.settings = saved
       let out = FileManager.default.temporaryDirectory.appendingPathComponent("agent-smoke.txt")
       try? "\(model.assistant.state)\nsteps: \(model.assistant.steps)\n".write(to: out, atomically: true, encoding: .utf8)
       NSApp.terminate(nil)
@@ -29,6 +32,25 @@
 
     static func run(model: AppModel, into dir: URL) async {
       try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+      func capture(_ view: some View, size: NSSize, name: String) async {
+        let host = NSHostingView(rootView: AnyView(view.environment(model).preferredColorScheme(.light)))
+        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -4000, y: -4000), size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        window.orderBack(nil)
+        try? await Task.sleep(for: .milliseconds(600))
+        host.layoutSubtreeIfNeeded()
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return }
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("\(name).png"))
+        window.orderOut(nil)
+      }
+
+      // The first thing anyone sees. Never loads real accounts: snapshots only ever touch sample mail.
+      model.showSignInForSnapshot()
+      await capture(RootView(), size: NSSize(width: 1100, height: 700), name: "0-sign-in")
+      await capture(RequestsSettings().frame(width: 520), size: NSSize(width: 520, height: 640), name: "10-settings-requests")
+
       await model.startDemo()
       try? await Task.sleep(for: .milliseconds(300))
 

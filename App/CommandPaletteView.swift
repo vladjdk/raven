@@ -54,11 +54,17 @@ struct CommandPaletteView: View {
     for (index, box) in Mailbox.allCases.enumerated() {
       all.append(.init(id: "go-\(box.rawValue)", title: "Go to \(box.title)", systemImage: "arrow.right", keys: ["⌘", "\(index + 1)"]) { $0.go(to: box) })
     }
-    if !model.isDemo {
-      all.append(.init(id: "refresh", title: "Refresh", systemImage: "arrow.clockwise", keys: ["⌘", "R"]) { await $0.syncNow() })
+    all.append(.init(id: "refresh", title: "Refresh", systemImage: "arrow.clockwise", keys: ["⌘", "R"]) { await $0.syncNow() })
+    for (index, session) in model.sessions.enumerated() where session.email != model.activeEmail {
+      let email = session.email
+      all.append(.init(id: "account-\(email)", title: "Switch to \(email)", systemImage: "person.crop.circle",
+                       keys: index < 9 ? ["⌃", "⌘", "\(index + 1)"] : []) { await $0.switchAccount(to: email) })
+    }
+    if model.oauth != nil {
+      all.append(.init(id: "add-account", title: "Add account", systemImage: "person.crop.circle.badge.plus", keys: []) { $0.signIn() })
     }
     all.append(.init(id: "settings", title: "Settings", systemImage: "gearshape", keys: ["⌘", ","]) { _ in openSettings() })
-    all.append(.init(id: "signout", title: model.isDemo ? "Leave sample mailbox" : "Sign out", systemImage: "rectangle.portrait.and.arrow.right", keys: []) {
+    all.append(.init(id: "signout", title: "Sign out of \(model.account ?? "this account")", systemImage: "rectangle.portrait.and.arrow.right", keys: []) {
       $0.requestSignOut()
     })
     return all
@@ -73,9 +79,9 @@ struct CommandPaletteView: View {
       model.searchText = q
     }
     // A few words or more can also be a request to carry out ("archive this week's newsletters").
-    guard q.split(separator: " ").count >= 3, Assistant.isAvailable else { return filtered + [search] }
+    guard q.split(separator: " ").count >= 3 else { return filtered + [search] }
     let request: PaletteCommand
-    if model.assistant.hasAPIKey {
+    if model.assistant.isReady {
       request = .init(id: "do", title: "Do this: “\(q)”", systemImage: "bolt", keys: []) { await $0.assistant.run(q) }
     } else {
       request = .init(id: "setup", title: "Do this: “\(q)” · set up in Settings", systemImage: "bolt", keys: [], enabled: false) { _ in
@@ -301,7 +307,7 @@ struct AssistantResultView: View {
         }
       case .failed(let message):
         ResultCard(icon: "exclamationmark", tint: Color(hex: 0xB45309), background: Color(hex: 0xFFF7ED), title: message) {
-          if !assistant.hasAPIKey && Assistant.isAvailable {
+          if !assistant.isReady {
             Button("Open Settings") { openSettings() }.buttonStyle(SecondaryButtonStyle())
           }
           Button("Close") { model.isPaletteOpen = false }.buttonStyle(SecondaryButtonStyle())

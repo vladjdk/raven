@@ -88,13 +88,12 @@ struct MainView: View {
           .transition(.move(edge: .bottom).combined(with: .opacity))
       }
     }
-    .confirmationDialog(
-      model.isDemo ? "Leave the sample mailbox?" : "Sign out of \(model.account ?? "Gmail")?",
-      isPresented: $model.isConfirmingSignOut
-    ) {
-      Button(model.isDemo ? "Leave" : "Sign Out", role: .destructive) { Task { await model.signOut() } }
+    .confirmationDialog("Sign out of \(model.account ?? "Gmail")?", isPresented: $model.isConfirmingSignOut) {
+      Button("Sign Out", role: .destructive) { Task { await model.signOut() } }
     } message: {
-      Text(model.isDemo ? "Changes you made to the sample mail won't be kept." : "Mail stored on this Mac will be removed. It stays in your Gmail account.")
+      Text(model.sessions.count > 1
+        ? "This account's mail will be removed from this Mac. It stays in Gmail, and your other accounts stay signed in."
+        : "Mail stored on this Mac will be removed. It stays in your Gmail account.")
     }
   }
 
@@ -157,10 +156,13 @@ struct SidebarView: View {
         .help("\(box.title) (⌘\(index + 1))")
       }
       Spacer()
-      AccountMenu()
+      AccountsSection(namespace: selection)
+      SettingsRow()
     }
     .padding(.horizontal, 12)
     .animation(Motion.state, value: model.mailbox)
+    .animation(Motion.state, value: model.activeEmail)
+    .animation(Motion.state, value: model.sessions.map(\.email))
   }
 
   private func icon(_ box: Mailbox) -> String {
@@ -174,46 +176,156 @@ struct SidebarView: View {
   }
 }
 
-/// The account line at the bottom of the sidebar doubles as the way to Settings and signing out.
-struct AccountMenu: View {
+/// Every signed-in account, with unread counts, plus the way to add another.
+struct AccountsSection: View {
+  @Environment(AppModel.self) private var model
+  let namespace: Namespace.ID
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 2) {
+      Text("Accounts")
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(Theme.tertiary)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 4)
+      ForEach(Array(model.sessions.enumerated()), id: \.element.email) { index, session in
+        AccountRow(session: session, isActive: session.email == model.activeEmail, namespace: namespace) {
+          Task { await model.switchAccount(to: session.email) }
+        }
+        .help(index < 9 ? "\(session.email) (⌃⌘\(index + 1))" : session.email)
+        .contextMenu {
+          if session.needsReauth {
+            Button("Sign In Again…") { model.signIn(as: session.email) }
+          }
+          Button("Sign Out of \(session.email)…") {
+            Task {
+              await model.switchAccount(to: session.email)
+              model.requestSignOut()
+            }
+          }
+        }
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
+      }
+      AddAccountRow()
+    }
+    .padding(.bottom, 6)
+  }
+}
+
+struct AccountRow: View {
+  let session: AccountSession
+  let isActive: Bool
+  let namespace: Namespace.ID
+  let action: () -> Void
+  @State private var hovered = false
+
+  var body: some View {
+    Button(action: action) {
+      HStack(spacing: 9) {
+        Text(String(session.email.prefix(1)).uppercased())
+          .font(.system(size: 10, weight: .bold))
+          .foregroundStyle(Theme.avatar(for: session.email).foreground)
+          .frame(width: 18, height: 18)
+          .background(Theme.avatar(for: session.email).background, in: Circle())
+          .overlay(alignment: .bottomTrailing) {
+            if session.needsReauth {
+              Circle().fill(Color.orange).frame(width: 7, height: 7)
+                .overlay(Circle().strokeBorder(Theme.window, lineWidth: 1.5))
+                .offset(x: 2, y: 2)
+            }
+          }
+        Text(session.email)
+          .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+          .foregroundStyle(isActive ? Theme.ink : Theme.secondary)
+          .lineLimit(1)
+          .truncationMode(.middle)
+        Spacer(minLength: 4)
+        if session.isSyncing && isActive {
+          ProgressView().controlSize(.mini)
+        } else if session.unread > 0 {
+          Text("\(session.unread)")
+            .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+            .foregroundStyle(isActive ? Theme.accent : Theme.tertiary)
+            .contentTransition(.numericText())
+        }
+      }
+      .padding(.horizontal, 10)
+      .frame(height: 30)
+      .background {
+        if isActive {
+          RoundedRectangle(cornerRadius: 8)
+            .fill(Color.black.opacity(0.05))
+            .matchedGeometryEffect(id: "accountSelection", in: namespace)
+        } else if hovered {
+          RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.03))
+        }
+      }
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(PressableStyle())
+    .onHover { h in withAnimation(Motion.hover) { hovered = h } }
+  }
+}
+
+struct AddAccountRow: View {
   @Environment(AppModel.self) private var model
   @State private var hovered = false
 
   var body: some View {
-    Menu {
-      SettingsLink { Text("Settings…") }
-      if model.isDemo, model.oauth != nil {
-        Button("Sign in to Gmail…") { Task { await model.signOut() } }
-      }
-      Divider()
-      Button(model.isDemo ? "Leave Sample Mailbox" : "Sign Out…") { model.requestSignOut() }
+    Button {
+      if model.isAddingAccount { model.cancelSignIn() } else { model.signIn() }
     } label: {
-      HStack(spacing: 8) {
+      HStack(spacing: 9) {
+        Group {
+          if model.isAddingAccount {
+            ProgressView().controlSize(.mini)
+          } else {
+            Image(systemName: "plus").font(.system(size: 10, weight: .bold))
+          }
+        }
+        .frame(width: 18, height: 18)
+        .background(Circle().strokeBorder(Theme.tertiary.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [2, 2])))
+        Text(model.isAddingAccount ? "Waiting for browser… (cancel)" : "Add account")
+          .font(.system(size: 12))
+        Spacer()
+      }
+      .foregroundStyle(hovered ? Theme.ink : Theme.secondary)
+      .padding(.horizontal, 10)
+      .frame(height: 30)
+      .background(hovered ? Color.black.opacity(0.03) : .clear, in: RoundedRectangle(cornerRadius: 8))
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(PressableStyle())
+    .onHover { h in withAnimation(Motion.hover) { hovered = h } }
+    .disabled(model.oauth == nil)
+    .help("Add another Gmail account")
+  }
+}
+
+/// Settings, with the sync status of the account on screen.
+struct SettingsRow: View {
+  @Environment(AppModel.self) private var model
+  @State private var hovered = false
+
+  var body: some View {
+    SettingsLink {
+      HStack(spacing: 9) {
+        Image(systemName: "gearshape").font(.system(size: 12, weight: .medium)).frame(width: 18)
+        Text("Settings").font(.system(size: 12))
+        Spacer()
         Circle()
           .fill(model.needsReauth || model.errorMessage != nil ? Color.orange : Color.green.opacity(0.8))
-          .frame(width: 7, height: 7)
-        Text(model.account ?? "Signed in")
-          .lineLimit(1)
-          .truncationMode(.middle)
-        Spacer(minLength: 0)
-        if model.isSyncing {
-          ProgressView().controlSize(.mini)
-        } else {
-          Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold))
-        }
+          .frame(width: 6, height: 6)
       }
-      .font(.system(size: 12))
-      .foregroundStyle(Theme.secondary)
+      .foregroundStyle(hovered ? Theme.ink : Theme.secondary)
       .padding(.horizontal, 10)
-      .frame(height: 32)
+      .frame(height: 30)
       .background(hovered ? Color.black.opacity(0.04) : .clear, in: RoundedRectangle(cornerRadius: 8))
       .contentShape(Rectangle())
     }
-    .menuStyle(.button)
     .buttonStyle(.plain)
-    .menuIndicator(.hidden)
     .onHover { h in withAnimation(Motion.hover) { hovered = h } }
-    .help(model.isDemo ? "Sample mailbox. Nothing is synced." : (model.needsReauth ? "Sign in again to keep syncing" : "Account, Settings and sign out"))
+    .help(model.needsReauth ? "Sign in again to keep syncing" : (model.errorMessage ?? "Up to date. Settings (⌘,)"))
     .padding(.bottom, 12)
   }
 }

@@ -27,6 +27,7 @@ mailfs/
 
 # --- Xcode / Swift -------------------------------------------------------
 .build/
+dist/
 build/
 DerivedData/
 *.xcodeproj/xcuserdata/

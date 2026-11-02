@@ -3,6 +3,35 @@ import Observation
 import RavenCore
 import SwiftUI
 
+/// One signed-in Gmail account: its own local database, tokens and sync engine.
+@MainActor
+@Observable
+final class AccountSession {
+  let email: String
+  let store: MailStore
+  fileprivate(set) var tokens: TokenStore
+  fileprivate(set) var engine: SyncEngine
+  fileprivate(set) var hasSyncedOnce: Bool
+  fileprivate(set) var needsReauth = false
+  fileprivate(set) var isSyncing = false
+  /// Unread in the inbox, for the account switcher.
+  fileprivate(set) var unread = 0
+
+  fileprivate init(email: String, store: MailStore, tokens: TokenStore, hasSyncedOnce: Bool) {
+    self.email = email
+    self.store = store
+    self.tokens = tokens
+    self.engine = SyncEngine(store: store, api: GmailClient(tokens: tokens))
+    self.hasSyncedOnce = hasSyncedOnce
+  }
+
+  fileprivate func use(_ tokens: TokenStore) {
+    self.tokens = tokens
+    engine = SyncEngine(store: store, api: GmailClient(tokens: tokens))
+    needsReauth = false
+  }
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -28,13 +57,21 @@ final class AppModel {
   }
 
   private(set) var phase: Phase = .launching
+  /// Sample mail, used only by debug snapshot runs. The shipped app always starts at sign-in.
   private(set) var isDemo = false
-  private(set) var account: String?
-  private(set) var isSyncing = false
-  private(set) var hasSyncedOnce = false
-  /// Google rejected our token; mail is still here but nothing syncs until you sign in again.
-  private(set) var needsReauth = false
+  /// Every signed-in account, in the order they were added.
+  private(set) var sessions: [AccountSession] = []
+  private(set) var activeEmail: String?
+  /// True while the browser is open to add another account.
+  private(set) var isAddingAccount = false
   var errorMessage: String?
+
+  var active: AccountSession? { sessions.first { $0.email == activeEmail } }
+  var account: String? { isDemo ? "Sample mailbox" : activeEmail }
+  var isSyncing: Bool { active?.isSyncing ?? false }
+  var hasSyncedOnce: Bool { active?.hasSyncedOnce ?? isDemo }
+  /// Google rejected this account's token; mail is still here but nothing syncs until you sign in again.
+  var needsReauth: Bool { active?.needsReauth ?? false }
 
   private(set) var mailbox: Mailbox = .inbox
   private(set) var tab: InboxTab = .important
@@ -68,16 +105,26 @@ final class AppModel {
   /// The email being written, if the composer is open.
   var draft: Draft?
   /// Drafts closed without sending, one per thread (or "new"), restored when that composer reopens.
-  private var keptDrafts: [String: Draft] = [:]
+  /// Kept per account so switching accounts doesn't lose them.
+  private var keptDraftsByAccount: [String: [String: Draft]] = [:]
+  private var keptDrafts: [String: Draft] {
+    get { keptDraftsByAccount[activeKey] ?? [:] }
+    set { keptDraftsByAccount[activeKey] = newValue }
+  }
 
-  private var store: MailStore?
-  private var engine: SyncEngine?
-  private var tokens: TokenStore?
+  private var demoStore: MailStore?
+  private var store: MailStore? { active?.store ?? demoStore }
+  private var engine: SyncEngine? { active?.engine }
+  private var activeKey: String { activeEmail ?? "demo" }
   private var syncLoop: Task<Void, Never>?
   private var searchTask: Task<Void, Never>?
   private var signInTask: Task<Void, Never>?
-  private var undoStack: [UndoEntry] = []
-  private var pendingSend: (draft: Draft, task: Task<Void, Never>, toastID: UUID)?
+  private var undoStacks: [String: [UndoEntry]] = [:]
+  private var undoStack: [UndoEntry] {
+    get { undoStacks[activeKey] ?? [] }
+    set { undoStacks[activeKey] = newValue }
+  }
+  private var pendingSend: (draft: Draft, account: String, task: Task<Void, Never>, toastID: UUID)?
   /// While the agent runs, its changes collect here so one Undo reverts the whole request.
   private var actionGroup: [MailAction]?
 
@@ -116,6 +163,9 @@ final class AppModel {
   /// First sync of a new account: show placeholders instead of an empty inbox.
   var isFirstSync: Bool { !isDemo && !hasSyncedOnce && threads.isEmpty }
 
+  /// Show who a message is from when there's more than one account to send from.
+  var showsFromAccount: Bool { sessions.count > 1 }
+
   var canUndo: Bool { !undoStack.isEmpty || pendingSend != nil }
 
   var undoTitle: String {
@@ -147,49 +197,72 @@ final class AppModel {
   // MARK: Lifecycle
 
   func start() async {
-    if CommandLine.arguments.contains("--demo") {
-      await startDemo()
-      return
-    }
     guard let oauth else {
       phase = .signedOut
       return
     }
-    let tokens = TokenStore(oauth: oauth, keychain: keychain, account: "google")
-    guard await tokens.hasTokens else {
+    for email in Self.savedAccounts {
+      let tokens = TokenStore(oauth: oauth, keychain: keychain, account: Self.tokenKey(email))
+      guard await tokens.hasTokens, let session = try? await makeSession(email: email, tokens: tokens) else { continue }
+      sessions.append(session)
+    }
+    saveAccountList()
+    guard let first = sessions.first else {
       phase = .signedOut
       return
     }
-    await open(tokens: tokens)
+    let last = UserDefaults.standard.string(forKey: "activeAccount")
+    activeEmail = sessions.contains { $0.email == last } ? last : first.email
+    withAnimation(Motion.panel) { phase = .ready }
+    await reload(newContext: true)
+    startSyncLoop()
   }
 
-  func signIn() {
+  /// Signs in to Google. From the sign-in screen this is the first account; once signed in it adds
+  /// another, or, when that account's sign-in expired, renews it.
+  func signIn(as hint: String? = nil) {
     guard let oauth else { return }
     let wasReady = phase == .ready
-    if !wasReady { phase = .signingIn }
+    if wasReady {
+      isAddingAccount = true
+      show(Toast(text: "Continue in your browser", canUndo: false), for: 4)
+    } else {
+      phase = .signingIn
+    }
     errorMessage = nil
     signInTask?.cancel()
     signInTask = Task {
+      defer { isAddingAccount = false }
       do {
-        let new = try await oauth.signIn { url in
+        let new = try await oauth.signIn(loginHint: hint) { url in
           await MainActor.run { _ = NSWorkspace.shared.open(url) }
         }
-        let tokens = TokenStore(oauth: oauth, keychain: keychain, account: "google")
+        // Tokens first, then ask Gmail whose they are, then file them under that address.
+        let tokens = TokenStore(oauth: oauth, keychain: keychain, account: "google:pending")
         try await tokens.save(new)
+        let email = try await GmailClient(tokens: tokens).profile().emailAddress.lowercased()
+        try await tokens.rename(to: Self.tokenKey(email))
         NSApp.activate(ignoringOtherApps: true)
-        needsReauth = false
-        if wasReady, let store = self.store {
-          // Re-auth keeps the local mailbox; just swap in the new tokens.
-          self.tokens = tokens
-          self.engine = SyncEngine(store: store, api: GmailClient(tokens: tokens))
-          startSyncLoop()
+        if let existing = sessions.first(where: { $0.email == email }) {
+          existing.use(tokens)
         } else {
-          await open(tokens: tokens)
+          sessions.append(try await makeSession(email: email, tokens: tokens))
+          saveAccountList()
         }
+        if wasReady {
+          await switchAccount(to: email)
+          show(Toast(text: "Signed in as \(email)", canUndo: false), for: 2.5)
+        } else {
+          activeEmail = email
+          UserDefaults.standard.set(email, forKey: "activeAccount")
+          withAnimation(Motion.panel) { phase = .ready }
+          await reload(newContext: true)
+        }
+        startSyncLoop()
       } catch is CancellationError {
         if !wasReady { phase = .signedOut }
       } catch {
-        errorMessage = error.localizedDescription
+        errorMessage = Self.describe(signInError: error)
         if !wasReady { phase = .signedOut }
       }
     }
@@ -198,62 +271,102 @@ final class AppModel {
   func cancelSignIn() {
     signInTask?.cancel()
     signInTask = nil
+    isAddingAccount = false
     if phase == .signingIn { phase = .signedOut }
   }
 
-  func startDemo() async {
-    do {
-      let store = try MailStore(url: nil)
-      try await store.upsert(SampleMail.messages())
-      self.store = store
-      isDemo = true
-      account = "Sample mailbox"
-      errorMessage = nil
-      withAnimation(Motion.panel) { phase = .ready }
-      await reload(newContext: true)
-      // No server in demo mode, but snoozes still wake up.
-      syncLoop = Task { [weak self] in
-        while !Task.isCancelled {
-          try? await Task.sleep(for: .seconds(20))
-          await self?.wakeDemoSnoozes()
-        }
-      }
-    } catch {
-      errorMessage = error.localizedDescription
+  private static func describe(signInError error: Error) -> String {
+    if case OAuthError.denied = error { return "Sign-in was cancelled in the browser." }
+    if let error = error as? GmailError, case .http(403, _) = error {
+      return "Google didn't allow access to Gmail. Check that the Gmail API is enabled for this app."
     }
+    return error.localizedDescription
   }
 
-  private func wakeDemoSnoozes() async {
-    guard isDemo, let store, let due = try? await store.dueSnoozes(), !due.isEmpty else { return }
-    for id in due { try? await store.apply(.unsnooze(threadID: id)) }
-    await reload()
+  /// Switches the window to another signed-in account. Each account keeps its own drafts and undo history.
+  func switchAccount(to email: String) async {
+    guard email != activeEmail, sessions.contains(where: { $0.email == email }), !assistant.isRunning else { return }
+    if let current = draft { keep(current) }
+    withAnimation(Motion.state) { draft = nil }
+    closeThread()
+    searchTask?.cancel()
+    searchText = ""
+    isPaletteOpen = false
+    isSnoozePickerOpen = false
+    assistant.reset()
+    selectedID = nil
+    mailbox = .inbox
+    tab = .important
+    activeEmail = email
+    UserDefaults.standard.set(email, forKey: "activeAccount")
+    errorMessage = nil
+    await reload(newContext: true)
   }
+
+  /// The next account in the list, for the keyboard switcher.
+  func cycleAccount() async {
+    guard sessions.count > 1, let index = sessions.firstIndex(where: { $0.email == activeEmail }) else { return }
+    await switchAccount(to: sessions[(index + 1) % sessions.count].email)
+  }
+
+  #if DEBUG
+    func showSignInForSnapshot() { phase = .signedOut }
+
+    /// Sample mail for snapshot runs only. Real accounts are never loaded alongside it.
+    func startDemo() async {
+      precondition(sessions.isEmpty, "sample mail must never share a run with real accounts")
+      do {
+        let store = try MailStore(url: nil)
+        try await store.upsert(SampleMail.messages())
+        demoStore = store
+        isDemo = true
+        errorMessage = nil
+        withAnimation(Motion.panel) { phase = .ready }
+        await reload(newContext: true)
+      } catch {
+        errorMessage = error.localizedDescription
+      }
+    }
+  #endif
 
   func requestSignOut() { isConfirmingSignOut = true }
 
+  /// Signs out of the account on screen. Other accounts stay signed in.
   func signOut() async {
     await flushPendingSend()
+    guard let session = active, !isDemo else {
+      resetToSignedOut()
+      return
+    }
+    try? await session.tokens.clear()
+    Self.removeDatabase(for: session.email)
+    sessions.removeAll { $0.email == session.email }
+    undoStacks[session.email] = nil
+    keptDraftsByAccount[session.email] = nil
+    saveAccountList()
+    if let next = sessions.first {
+      await switchAccount(to: next.email)
+      show(Toast(text: "Signed out of \(session.email)", canUndo: false), for: 2.5)
+    } else {
+      resetToSignedOut()
+    }
+  }
+
+  private func resetToSignedOut() {
     syncLoop?.cancel()
     searchTask?.cancel()
     signInTask?.cancel()
-    try? await tokens?.clear()
-    let wasDemo = isDemo
-    store = nil
-    engine = nil
-    tokens = nil
-    if !wasDemo, let url = Self.databaseURL {
-      for suffix in ["", "-wal", "-shm"] {
-        try? FileManager.default.removeItem(at: URL(fileURLWithPath: url.path + suffix))
-      }
-    }
+    demoStore = nil
+    sessions = []
+    activeEmail = nil
     threads = []
     counts = [:]
     openThread = nil
     openMessages = []
     selectedID = nil
     draft = nil
-    keptDrafts = [:]
-    undoStack = []
+    keptDraftsByAccount = [:]
+    undoStacks = [:]
     actionGroup = nil
     toast = nil
     searchText = ""
@@ -262,34 +375,42 @@ final class AppModel {
     isPaletteOpen = false
     isSnoozePickerOpen = false
     errorMessage = nil
-    needsReauth = false
     assistant.reset()
     isDemo = false
-    hasSyncedOnce = false
-    account = nil
+    saveAccountList()
     withAnimation(Motion.panel) { phase = .signedOut }
   }
 
-  private static var databaseURL: URL? {
-    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-      .appendingPathComponent("Raven/mail.sqlite")
+  // MARK: Accounts on disk
+
+  private static var savedAccounts: [String] { UserDefaults.standard.stringArray(forKey: "accounts") ?? [] }
+
+  private func saveAccountList() {
+    UserDefaults.standard.set(sessions.map(\.email), forKey: "accounts")
   }
 
-  private func open(tokens: TokenStore) async {
-    do {
-      let store = try MailStore(url: Self.databaseURL)
-      self.store = store
-      self.tokens = tokens
-      engine = SyncEngine(store: store, api: GmailClient(tokens: tokens))
-      account = try await store.meta("account")
-      hasSyncedOnce = try await store.meta("historyId") != nil
-      withAnimation(Motion.panel) { phase = .ready }
-      await reload(newContext: true)
-      startSyncLoop()
-    } catch {
-      errorMessage = error.localizedDescription
-      phase = .signedOut
-    }
+  private static func tokenKey(_ email: String) -> String { "google:\(email)" }
+
+  /// Each account's mail lives in its own folder: Application Support/Raven/Accounts/<address>/.
+  private static func accountFolder(_ email: String) -> URL? {
+    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+      .appendingPathComponent("Raven/Accounts", isDirectory: true)
+      .appendingPathComponent(email, isDirectory: true)
+  }
+
+  private static func removeDatabase(for email: String) {
+    guard let folder = accountFolder(email) else { return }
+    try? FileManager.default.removeItem(at: folder)
+  }
+
+  private func makeSession(email: String, tokens: TokenStore) async throws -> AccountSession {
+    guard let folder = Self.accountFolder(email) else { throw CocoaError(.fileNoSuchFile) }
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let store = try MailStore(url: folder.appendingPathComponent("mail.sqlite"))
+    let synced = try await store.meta("historyId") != nil
+    let session = AccountSession(email: email, store: store, tokens: tokens, hasSyncedOnce: synced)
+    session.unread = (try? await store.counts()[.inbox]) ?? 0
+    return session
   }
 
   private func startSyncLoop() {
@@ -302,31 +423,40 @@ final class AppModel {
     }
   }
 
+  /// Syncs every account, the one on screen first.
   func syncNow() async {
-    guard let engine, !isSyncing, !needsReauth else { return }
-    isSyncing = true
-    defer { isSyncing = false }
-    do {
-      try await engine.sync()
-      account = try await store?.meta("account")
-      hasSyncedOnce = true
-      errorMessage = nil
-    } catch is CancellationError {
-    } catch let error as OAuthError where error.needsSignIn {
-      reauthRequired()
-    } catch let error as GmailError where error.isAuth {
-      reauthRequired()
-    } catch let error as URLError where error.code == .notConnectedToInternet || error.code == .networkConnectionLost {
-      errorMessage = "You're offline. Changes will sync when you're back."
-    } catch {
-      errorMessage = error.localizedDescription
-    }
-    await reload()
+    let ordered = sessions.sorted { a, _ in a.email == activeEmail }
+    for session in ordered { await sync(session) }
   }
 
-  private func reauthRequired() {
-    needsReauth = true
-    errorMessage = "Your Google sign-in expired. Your changes are saved and will sync after you sign in again."
+  private func sync(_ session: AccountSession) async {
+    guard !session.isSyncing, !session.needsReauth else { return }
+    session.isSyncing = true
+    defer { session.isSyncing = false }
+    let isActive = session.email == activeEmail
+    do {
+      try await session.engine.sync()
+      session.hasSyncedOnce = true
+      if isActive { errorMessage = nil }
+    } catch is CancellationError {
+    } catch let error as OAuthError where error.needsSignIn {
+      reauthRequired(session)
+    } catch let error as GmailError where error.isAuth {
+      reauthRequired(session)
+    } catch let error as URLError where error.code == .notConnectedToInternet || error.code == .networkConnectionLost {
+      if isActive { errorMessage = "You're offline. Changes will sync when you're back." }
+    } catch {
+      if isActive { errorMessage = error.localizedDescription }
+    }
+    session.unread = (try? await session.store.counts()[.inbox]) ?? session.unread
+    if session.email == activeEmail { await reload() }
+  }
+
+  private func reauthRequired(_ session: AccountSession) {
+    session.needsReauth = true
+    if session.email == activeEmail {
+      errorMessage = "Your Google sign-in expired. Your changes are saved and will sync after you sign in again."
+    }
   }
 
   /// Reloads from the store. In-place changes (archive, read) animate per row;
@@ -338,6 +468,7 @@ final class AppModel {
         ? try await store.threads(in: mailbox)
         : try await store.search(searchText)
       let newCounts = try await store.counts()
+      active?.unread = newCounts[.inbox] ?? 0
       let apply = {
         self.threads = fresh
         self.counts = newCounts
@@ -485,6 +616,7 @@ final class AppModel {
     if let pending = pendingSend {
       pending.task.cancel()
       pendingSend = nil
+      if pending.account != activeKey, !isDemo { await switchAccount(to: pending.account) }
       if let current = draft { keep(current) }
       withAnimation(Motion.state) {
         toast = nil
@@ -681,13 +813,14 @@ final class AppModel {
     keptDrafts.removeValue(forKey: key(for: outgoing))
     let toast = Toast(text: "Sending…", style: .sending)
     withAnimation(Motion.state) { self.toast = toast }
+    let account = activeKey
     let task = Task { [weak self] in
       try? await Task.sleep(for: .seconds(Self.undoSendSeconds))
       guard !Task.isCancelled, let self, self.pendingSend?.toastID == toast.id else { return }
       self.pendingSend = nil
-      await self.deliver(outgoing)
+      await self.deliver(outgoing, from: account)
     }
-    pendingSend = (outgoing, task, toast.id)
+    pendingSend = (outgoing, account, task, toast.id)
   }
 
   /// Sends anything waiting in the undo window right away (quitting, signing out).
@@ -695,19 +828,21 @@ final class AppModel {
     guard let pending = pendingSend else { return }
     pending.task.cancel()
     pendingSend = nil
-    await deliver(pending.draft)
+    await deliver(pending.draft, from: pending.account)
   }
 
-  private func deliver(_ outgoing: Draft) async {
+  /// Sends from the account the draft was written in, even if you've switched since.
+  private func deliver(_ outgoing: Draft, from account: String) async {
     do {
-      if let engine {
-        try await engine.send(outgoing, from: me)
-      } else if let store {
+      if let session = sessions.first(where: { $0.email == account }) {
+        try await session.engine.send(outgoing, from: Address(email: session.email))
+      } else if let store = demoStore {
         try await store.upsert([demoSentMessage(outgoing)])
       }
       show(Toast(text: isDemo ? "Sent · sample mailbox" : "Sent", canUndo: false), for: 2)
     } catch {
       // Put it back so nothing is lost.
+      if account != activeKey { await switchAccount(to: account) }
       if let current = draft { keep(current) }
       withAnimation(Motion.state) {
         toast = nil

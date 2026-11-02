@@ -17,6 +17,8 @@ struct RavenApp: App {
           #if DEBUG
             if SnapshotRunner.outputDirectory != nil || SnapshotRunner.isAgentSmoke { return }
           #endif
+          // Check existing Claude/ChatGPT sign-ins in the background so ⌘K knows what's ready.
+          Task { await model.assistant.prepare() }
           await model.start()
         }
     }
@@ -117,8 +119,20 @@ struct RavenCommands: Commands {
       Divider()
       Button("Refresh") { Task { await model.syncNow() } }
         .keyboardShortcut("r")
-        .disabled(model.isDemo || model.phase != .ready)
-      Button(model.isDemo ? "Leave Sample Mailbox" : "Sign Out…") { model.requestSignOut() }
+        .disabled(model.phase != .ready)
+      Divider()
+      ForEach(Array(model.sessions.prefix(9).enumerated()), id: \.element.email) { index, session in
+        Toggle(session.email, isOn: Binding(
+          get: { session.email == model.activeEmail },
+          set: { _ in Task { await model.switchAccount(to: session.email) } }))
+          .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [.command, .control])
+      }
+      Button("Next Account") { Task { await model.cycleAccount() } }
+        .keyboardShortcut("`", modifiers: [.command, .control])
+        .disabled(model.sessions.count < 2)
+      Button("Add Account…") { model.signIn() }
+        .disabled(model.oauth == nil || model.phase != .ready)
+      Button("Sign Out of \(model.account ?? "Account")…") { model.requestSignOut() }
         .disabled(model.phase != .ready)
     }
   }

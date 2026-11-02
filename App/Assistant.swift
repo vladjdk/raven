@@ -1,11 +1,40 @@
+import AppKit
 import Foundation
+import Nanocode
+import NanocodeCore
 import RavenCore
 import SwiftUI
 
-#if canImport(Nanocode)
-  import Nanocode
-  import NanocodeCore
-#endif
+/// How requests run, saved as `settings.json` in the assistant's folder on this Mac.
+/// Sign-ins and keys never go in this file; they live in the Keychain.
+struct AssistantSettings: Codable, Equatable {
+  enum Service: String, Codable, CaseIterable, Identifiable {
+    case claude, chatgpt
+    var id: Self { self }
+    var name: String { self == .claude ? "Claude" : "ChatGPT" }
+    var provider: Provider { self == .claude ? .claude : .codex }
+    var defaultModel: String { self == .claude ? "claude-sonnet-5-5" : "gpt-6-luna" }
+    var keychainAccount: String { self == .claude ? "anthropic-api-key" : "openai-api-key" }
+    var keyPlaceholder: String { self == .claude ? "sk-ant-…" : "sk-…" }
+  }
+
+  enum Access: String, Codable, CaseIterable, Identifiable {
+    /// Your Claude Pro/Max or ChatGPT Plus/Pro subscription.
+    case plan
+    /// A developer API key, billed per request.
+    case apiKey
+    var id: Self { self }
+  }
+
+  var service: Service = .claude
+  var access: Access = .plan
+  /// nil means the service's default.
+  var model: String?
+  /// Extra context given to every request ("I'm in New York; my manager is Dana").
+  var notes = ""
+
+  var resolvedModel: String { model ?? service.defaultModel }
+}
 
 /// Runs plain-English requests from ⌘K ("archive this week's newsletters except The Weekly Byte")
 /// with a nanocode agent. The agent only gets Raven's mail tools: no shell, files, web or sending.
@@ -25,32 +54,90 @@ final class Assistant {
   /// Whether the last request changed anything (so its Undo means something).
   private(set) var madeChanges = false
 
-  static let keychainAccount = "anthropic-api-key"
-  static let model = "claude-sonnet-5-5"
+  var settings: AssistantSettings {
+    didSet { if settings != oldValue { saveSettings() } }
+  }
+  /// Claude and ChatGPT plan sign-ins, once the runtime has started.
+  private(set) var plans: PlanMonitor?
+  /// Models each service offers, for the picker in Settings.
+  private(set) var catalog: [Provider: [ModelEntry]] = [:]
+  /// Bumped when a key is saved or removed, so views re-read the Keychain.
+  private(set) var keyRevision = 0
 
   private weak var app: AppModel?
-  #if canImport(Nanocode)
-    @ObservationIgnored private var runtime: NanocodeRuntime?
-  #endif
+  @ObservationIgnored private var runtime: NanocodeRuntime?
+
+  /// Everything the assistant keeps on this Mac: settings.json and nanocode's request history.
+  static var folder: URL {
+    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+      .appendingPathComponent("Raven/Assistant", isDirectory: true)
+  }
+  private static var settingsURL: URL { folder.appendingPathComponent("settings.json") }
 
   init(app: AppModel) {
     self.app = app
+    settings = (try? Data(contentsOf: Self.settingsURL)).flatMap { try? JSONDecoder().decode(AssistantSettings.self, from: $0) }
+      ?? AssistantSettings()
   }
 
-  var hasAPIKey: Bool { apiKey != nil }
+  private func saveSettings() {
+    try? FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try? encoder.encode(settings).write(to: Self.settingsURL, options: .atomic)
+  }
+
+  /// Starts the runtime and checks existing sign-ins. Cheap to call again.
+  func prepare() async {
+    guard let runtime = try? ensureRuntime() else { return }
+    await plans?.refresh()
+    if catalog.isEmpty, let models = try? await runtime.models() { catalog = models.models }
+  }
+
+  private func ensureRuntime() throws -> NanocodeRuntime {
+    if let runtime { return runtime }
+    try FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+    let new = try NanocodeRuntime(dataDirectory: Self.folder.appendingPathComponent("runtime", isDirectory: true))
+    runtime = new
+    plans = PlanMonitor(runtime: new, store: KeychainSubscriptionStore(service: "dev.raven.Raven.plans"))
+    return new
+  }
+
+  /// Whether a request can run right now with the chosen service and sign-in.
+  var isReady: Bool {
+    switch settings.access {
+    case .plan: plans?.isSignedIn(settings.service.provider) ?? false
+    case .apiKey: apiKey(for: settings.service) != nil
+    }
+  }
 
   #if DEBUG
     /// Lets `--agent-smoke` exercise the runtime without touching the Keychain.
     @ObservationIgnored var keyOverride: String?
   #endif
 
-  private var apiKey: String? {
+  func apiKey(for service: AssistantSettings.Service) -> String? {
+    _ = keyRevision
     #if DEBUG
       if let keyOverride { return keyOverride }
     #endif
-    guard let data = try? app?.keychain.get(Self.keychainAccount) else { return nil }
+    guard let data = try? app?.keychain.get(service.keychainAccount) else { return nil }
     let key = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     return key.isEmpty ? nil : key
+  }
+
+  func setAPIKey(_ key: String?, for service: AssistantSettings.Service) {
+    if let key, !key.isEmpty {
+      try? app?.keychain.set(Data(key.utf8), for: service.keychainAccount)
+    } else {
+      try? app?.keychain.delete(service.keychainAccount)
+    }
+    keyRevision += 1
+  }
+
+  func revealFolder() {
+    try? FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+    NSWorkspace.shared.activateFileViewerSelecting([Self.folder])
   }
 
   func reset() {
@@ -60,26 +147,29 @@ final class Assistant {
     madeChanges = false
   }
 
-  /// Whether this build includes the agent runtime.
-  static var isAvailable: Bool {
-    #if canImport(Nanocode)
-      true
-    #else
-      false
-    #endif
-  }
-
   var isRunning: Bool {
     if case .running = state { return true }
     return false
   }
 
   func run(_ request: String) async {
-    guard !isRunning else { return }
-    #if canImport(Nanocode)
-    guard let app, let key = apiKey else {
-      state = .failed("Add a key in Settings to use this.")
-      return
+    guard !isRunning, let app else { return }
+    let settings = self.settings
+    let authentication: Authentication
+    switch settings.access {
+    case .plan:
+      await prepare()
+      guard plans?.isSignedIn(settings.service.provider) == true else {
+        state = .failed("Sign in with \(settings.service.name) in Settings to use this.")
+        return
+      }
+      authentication = .plan
+    case .apiKey:
+      guard let key = apiKey(for: settings.service) else {
+        state = .failed("Add a key in Settings to use this.")
+        return
+      }
+      authentication = .apiKey(key)
     }
     state = .running(request)
     steps = []
@@ -87,16 +177,12 @@ final class Assistant {
     app.beginActionGroup()
     defer { madeChanges = app.endActionGroup() }
     do {
-      if runtime == nil {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-          .appendingPathComponent("Raven/agent")
-        runtime = try NanocodeRuntime(dataDirectory: dir)
-      }
+      let runtime = try ensureRuntime()
       let config = SessionConfiguration(
-        provider: .claude,
-        model: Self.model,
-        instructions: Self.instructions(me: app.me.email, now: Date()),
-        authentication: .apiKey(key),
+        provider: settings.service.provider,
+        model: settings.resolvedModel,
+        instructions: Self.instructions(me: app.me.email, now: Date(), notes: settings.notes),
+        authentication: authentication,
         subagents: false,
         workspace: nil,
         workspaceTools: .none,
@@ -104,7 +190,7 @@ final class Assistant {
         webSearch: false,
         paidTools: false
       )
-      guard let session = try await runtime?.open(config) else { return }
+      let session = try await runtime.open(config)
       let events = session.events  // Subscribe before submitting.
       _ = try await session.submit(request)
       for await event in events {
@@ -128,18 +214,17 @@ final class Assistant {
     } catch {
       state = .failed(Self.friendly(String(describing: error)))
     }
-    #else
-    state = .failed("Requests aren't included in this build yet.")
-    #endif
   }
 
   /// Provider errors arrive as raw HTTP bodies; say what to do instead.
   static func friendly(_ raw: String) -> String {
     let text = raw.lowercased()
-    if text.contains("401") || text.contains("authentication_error") || text.contains("x-api-key") {
-      return "That key didn't work. Check it in Settings."
+    if text.contains("401") || text.contains("authentication_error") || text.contains("x-api-key") || text.contains("invalid_api_key") {
+      return "That sign-in or key didn't work. Check it in Settings."
     }
-    if text.contains("429") || text.contains("rate_limit") { return "Too many requests right now. Try again in a minute." }
+    if text.contains("429") || text.contains("rate_limit") || text.contains("usage limit") {
+      return "You've hit your plan's limit for now. Try again later."
+    }
     if text.contains("529") || text.contains("overloaded") { return "The service is busy. Try again in a moment." }
     if text.contains("offline") || text.contains("network") || text.contains("timed out") {
       return "Couldn't connect. Check your internet connection."
@@ -151,7 +236,7 @@ final class Assistant {
     withAnimation(.snappy) { steps.append(step) }
   }
 
-  static func instructions(me: String, now: Date) -> String {
+  static func instructions(me: String, now: Date, notes: String = "") -> String {
     """
     You are the command bar of Raven, an email client. The user (\(me)) typed a request; carry it out \
     with the mail tools, then reply with one short sentence saying what you did (e.g. "Archived 16 \
@@ -165,11 +250,11 @@ final class Assistant {
       and say what you'd need to know.
     - Today is \(now.formatted(.iso8601)). Snooze times are ISO 8601 in the user's time zone \
       (\(TimeZone.current.identifier)).
+    \(notes.isEmpty ? "" : "\nAbout the user, in their words:\n" + notes)
     """
   }
 }
 
-#if canImport(Nanocode)
 /// The only tools the agent gets.
 enum MailTools {
   static func all(app: AppModel, assistant: Assistant) -> [HostTool] {
@@ -306,4 +391,3 @@ extension AppModel {
     }
   }
 }
-#endif

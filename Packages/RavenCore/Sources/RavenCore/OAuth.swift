@@ -50,7 +50,8 @@ public struct GoogleOAuth: Sendable {
     }
   }
 
-  public func authorizationURL(redirectURI: String, pkce: PKCE, state: String) -> URL {
+  /// `loginHint` pre-selects an account (signing in again); without it Google asks which account to use.
+  public func authorizationURL(redirectURI: String, pkce: PKCE, state: String, loginHint: String? = nil) -> URL {
     var c = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")!
     c.queryItems = [
       URLQueryItem(name: "client_id", value: clientID),
@@ -61,20 +62,22 @@ public struct GoogleOAuth: Sendable {
       URLQueryItem(name: "code_challenge_method", value: "S256"),
       URLQueryItem(name: "state", value: state),
       URLQueryItem(name: "access_type", value: "offline"),
-      URLQueryItem(name: "prompt", value: "consent"),
+      // Consent every time so Google always returns a refresh token; account picker so you can add another.
+      URLQueryItem(name: "prompt", value: "select_account consent"),
     ]
+    if let loginHint { c.queryItems?.append(URLQueryItem(name: "login_hint", value: loginHint)) }
     return c.url!
   }
 
   /// Runs the whole sign-in: opens `openURL` with Google's consent page, waits for the redirect,
   /// exchanges the code for tokens.
-  public func signIn(openURL: @Sendable (URL) async -> Void) async throws -> Tokens {
+  public func signIn(loginHint: String? = nil, openURL: @Sendable (URL) async -> Void) async throws -> Tokens {
     let pkce = PKCE.random()
     let state = UUID().uuidString
     let server = try await LoopbackServer.start()
     defer { server.stop() }
     let redirectURI = "http://127.0.0.1:\(server.port)"
-    await openURL(authorizationURL(redirectURI: redirectURI, pkce: pkce, state: state))
+    await openURL(authorizationURL(redirectURI: redirectURI, pkce: pkce, state: state, loginHint: loginHint))
     let query = try await server.waitForRedirect()
     if let error = query["error"] { throw OAuthError.denied(error) }
     guard query["state"] == state else { throw OAuthError.stateMismatch }
@@ -164,7 +167,7 @@ public enum OAuthError: Error, LocalizedError {
 public actor TokenStore {
   private let oauth: GoogleOAuth
   private let keychain: Keychain
-  private let account: String
+  public private(set) var account: String
   private var tokens: GoogleOAuth.Tokens?
 
   public init(oauth: GoogleOAuth, keychain: Keychain, account: String) {
@@ -195,6 +198,14 @@ public actor TokenStore {
   public func clear() throws {
     tokens = nil
     try keychain.delete(account)
+  }
+
+  /// Moves the saved tokens to another Keychain entry (once we know which address they belong to).
+  public func rename(to newAccount: String) throws {
+    guard newAccount != account else { return }
+    if let tokens { try keychain.set(try JSONEncoder().encode(tokens), for: newAccount) }
+    try? keychain.delete(account)
+    account = newAccount
   }
 }
 

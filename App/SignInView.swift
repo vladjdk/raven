@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SignInView: View {
@@ -6,12 +7,9 @@ struct SignInView: View {
   var body: some View {
     VStack(spacing: 28) {
       VStack(spacing: 10) {
-        Image(systemName: "envelope.fill")
-          .font(.system(size: 30, weight: .semibold))
-          .foregroundStyle(.white)
-          .frame(width: 64, height: 64)
-          .background(Theme.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-          .shadow(color: Theme.accent.opacity(0.3), radius: 12, y: 6)
+        Image(nsImage: NSApp.applicationIconImage)
+          .resizable()
+          .frame(width: 88, height: 88)
         Text("Raven")
           .font(.system(size: 28, weight: .bold))
           .padding(.top, 6)
@@ -44,16 +42,12 @@ struct SignInView: View {
               .transition(.opacity)
           }
         } else {
-          #if DEBUG
-            Text("Google sign-in isn't set up in this build.\nAdd your OAuth client to Config/Secrets.xcconfig.")
-              .multilineTextAlignment(.center)
-              .font(.callout)
-              .foregroundStyle(Theme.secondary)
-              .frame(maxWidth: 360)
-          #endif
+          Text("This copy of Raven was built without Google sign-in.\nAdd an OAuth client to Config/Secrets.xcconfig and rebuild.")
+            .multilineTextAlignment(.center)
+            .font(.callout)
+            .foregroundStyle(Theme.secondary)
+            .frame(maxWidth: 360)
         }
-        Button("Explore with sample mail") { Task { await model.startDemo() } }
-          .buttonStyle(SecondaryButtonStyle())
       }
 
       if let error = model.errorMessage {
@@ -64,7 +58,8 @@ struct SignInView: View {
           .multilineTextAlignment(.center)
       }
 
-      Text("Your mail syncs straight to this Mac. Nothing goes through a Raven server.")
+      Text("Your mail syncs straight to this Mac. Nothing goes through a Raven server.\nYou can add more Gmail accounts once you're in.")
+        .multilineTextAlignment(.center)
         .font(.footnote)
         .foregroundStyle(Theme.tertiary)
     }
